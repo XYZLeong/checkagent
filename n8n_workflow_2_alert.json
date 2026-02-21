@@ -1,0 +1,146 @@
+{
+  "name": "Drawing Alert \u2192 Send Gmail",
+  "meta": { "instanceId": "" },
+  "pinData": {},
+  "nodes": [
+    {
+      "id": "11111111-1111-1111-1111-111111111101",
+      "name": "Receive Alert",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "drawing-alert",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "11111111-1111-1111-1111-111111111102",
+      "name": "Complete Package?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [460, 300],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.body.report_type }}",
+              "operation": "equal",
+              "value2": "complete_package"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "11111111-1111-1111-1111-111111111103",
+      "name": "Send Complete Package Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [700, 160],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "toList": "CHANGE_TO_RECIPIENT_EMAIL@example.com",
+        "subject": "={{ '\u2705 ' + $json.body.project + ' \u2014 All Drawings Complete (' + $json.body.total_drawings + ' files)' }}",
+        "emailType": "html",
+        "message": "={{ '<div style=\"font-family:Arial,sans-serif\"><h2 style=\"color:#27ae60\">\u2705 Drawing Package Complete</h2><p>All <strong>' + $json.body.total_drawings + '</strong> fabrication drawings for project <strong>' + $json.body.project + '</strong> have been received. The ZIP file is attached.</p><p style=\"color:#888;font-size:12px\">Generated: ' + $json.body.timestamp + '</p></div>' }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "CHANGE_TO_YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "id": "11111111-1111-1111-1111-111111111104",
+      "name": "Build Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 440],
+      "parameters": {
+        "jsCode": "const d = $input.first().json.body;\nconst rows = (d.missing_drawings || []).map(p => {\n  const typeLabel = p.type === 'sheet_metal' ? 'Sheet Metal (290-)' : p.type === 'machining' ? 'Machining (300-)' : p.type || '-';\n  return `<tr><td style=\"padding:6px 10px;border:1px solid #ddd;font-family:monospace\">${p.part_no}</td><td style=\"padding:6px 10px;border:1px solid #ddd\">${p.description || '-'}</td><td style=\"padding:6px 10px;border:1px solid #ddd;text-align:center\">${p.qty}</td><td style=\"padding:6px 10px;border:1px solid #ddd\">${typeLabel}</td></tr>`;\n}).join('');\nconst emailHtml = `<div style=\"font-family:Arial,sans-serif;max-width:680px\"><h2 style=\"color:#c0392b\">&#9888; Missing Drawing Alert</h2><p>Project <strong>${d.project}</strong> is missing <strong>${d.missing_count}</strong> fabrication drawing(s).</p><table style=\"border-collapse:collapse;width:100%\"><thead><tr style=\"background:#f2f2f2\"><th style=\"padding:8px 10px;border:1px solid #ddd;text-align:left\">Part No</th><th style=\"padding:8px 10px;border:1px solid #ddd;text-align:left\">Description</th><th style=\"padding:8px 10px;border:1px solid #ddd;text-align:center\">Qty</th><th style=\"padding:8px 10px;border:1px solid #ddd;text-align:left\">Type</th></tr></thead><tbody>${rows}</tbody></table><p style=\"margin-top:20px\"><strong>Total fabrication parts:</strong> ${d.total_fabrication_parts}<br><strong>Present:</strong> ${d.total_fabrication_parts - d.missing_count}<br><strong>Missing:</strong> ${d.missing_count}</p><p style=\"color:#888;font-size:12px\">Checked: ${d.timestamp}<br>Folder: ${d.folder}</p><p>Please upload the missing drawings to Google Drive.</p></div>`;\nreturn [{ json: { ...d, emailHtml, emailSubject: `[MISSING DRAWINGS] ${d.project} \u2013 ${d.missing_count} drawing(s) missing` } }];"
+      }
+    },
+    {
+      "id": "11111111-1111-1111-1111-111111111105",
+      "name": "Any Missing?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [940, 440],
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.missing_count }}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "11111111-1111-1111-1111-111111111106",
+      "name": "Send Gmail Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [1180, 360],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "toList": "CHANGE_TO_RECIPIENT_EMAIL@example.com",
+        "subject": "={{ $json.emailSubject }}",
+        "emailType": "html",
+        "message": "={{ $json.emailHtml }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "CHANGE_TO_YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "id": "11111111-1111-1111-1111-111111111107",
+      "name": "All Drawings Present",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1180, 520],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Receive Alert": {
+      "main": [
+        [{"node": "Complete Package?", "type": "main", "index": 0}]
+      ]
+    },
+    "Complete Package?": {
+      "main": [
+        [{"node": "Send Complete Package Gmail", "type": "main", "index": 0}],
+        [{"node": "Build Email",                 "type": "main", "index": 0}]
+      ]
+    },
+    "Build Email": {
+      "main": [
+        [{"node": "Any Missing?", "type": "main", "index": 0}]
+      ]
+    },
+    "Any Missing?": {
+      "main": [
+        [{"node": "Send Gmail Alert",     "type": "main", "index": 0}],
+        [{"node": "All Drawings Present", "type": "main", "index": 0}]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

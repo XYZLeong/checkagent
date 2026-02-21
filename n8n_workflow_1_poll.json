@@ -1,0 +1,112 @@
+{
+  "name": "Google Drive \u2192 Drawing Agent (Poll Every 5 Min)",
+  "nodes": [
+    {
+      "id": "node-schedule",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "minutes", "minutesInterval": 5}]
+        }
+      }
+    },
+    {
+      "id": "node-list",
+      "name": "List All PDFs in Drive Folder",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [460, 300],
+      "parameters": {
+        "resource": "fileFolder",
+        "operation": "list",
+        "filter": {
+          "driveId": {"__rl": true, "mode": "list", "value": "My Drive"},
+          "folderId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "CHANGE_TO_YOUR_GOOGLE_DRIVE_FOLDER_ID",
+            "cachedResultName": "drawing"
+          }
+        },
+        "returnAll": true,
+        "options": {}
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "CHANGE_TO_YOUR_GDRIVE_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "id": "node-filter-pdf",
+      "name": "PDFs Only",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": false},
+          "conditions": [
+            {
+              "leftValue": "={{ $json.name }}",
+              "operator": {"type": "string", "operation": "endsWith"},
+              "rightValue": ".pdf"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-download",
+      "name": "Download File",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [900, 300],
+      "parameters": {
+        "resource": "file",
+        "operation": "download",
+        "fileId": {"__rl": true, "mode": "id", "value": "={{ $('PDFs Only').item.json.id }}"}
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "CHANGE_TO_YOUR_GDRIVE_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "id": "node-send",
+      "name": "Send to Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8765/file",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {"name": "file_id",   "value": "={{ $('PDFs Only').item.json.id }}"},
+            {"name": "filename",  "value": "={{ $('PDFs Only').item.json.name }}"},
+            {"name": "folder_id", "value": "={{ $('PDFs Only').item.json.parents[0] }}"},
+            {"parameterType": "formBinaryData", "name": "file", "inputDataFieldName": "data"}
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes":               {"main": [[{"node": "List All PDFs in Drive Folder", "type": "main", "index": 0}]]},
+    "List All PDFs in Drive Folder": {"main": [[{"node": "PDFs Only",                    "type": "main", "index": 0}]]},
+    "PDFs Only":                     {"main": [[{"node": "Download File",                "type": "main", "index": 0}]]},
+    "Download File":                 {"main": [[{"node": "Send to Agent",                "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"}
+}

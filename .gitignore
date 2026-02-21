@@ -5,6 +5,7 @@
 results_cache.json
 processed_files.json
 daily_received.json
+file_state.json
 *.log
 
 # Incoming PDF files

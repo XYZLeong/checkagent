@@ -23,6 +23,15 @@ STATE_FILE = Path(os.getenv("STATE_FILE", Path(__file__).parent / "processed_fil
 # JSON file storing the last known analysis result per project (for change detection)
 RESULTS_FILE = Path(os.getenv("RESULTS_FILE", Path(__file__).parent / "results_cache.json"))
 
+# JSON file storing the last known Google Drive modifiedTime per file (for duplicate detection)
+FILE_STATE = Path(os.getenv("FILE_STATE", Path(__file__).parent / "file_state.json"))
+
+# Directory where generated ZIP packages are stored for download by n8n
+ZIPS_DIR = Path(os.getenv("ZIPS_DIR", Path(__file__).parent / "zips"))
+
+# Base URL n8n uses to reach this agent (from inside Docker)
+AGENT_BASE_URL = os.getenv("AGENT_BASE_URL", "http://host.docker.internal:8765")
+
 
 # Drawing number regex patterns
 WELDMENT_PATTERN = re.compile(r"^210-\d{5}-\d{2}", re.IGNORECASE)

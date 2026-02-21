@@ -19,7 +19,6 @@ This means:
   • Repeated polls with no new/changed files produce no duplicate alerts.
 """
 
-import hashlib
 import json
 import logging
 import threading
@@ -84,20 +83,37 @@ def _update_result(project_name: str, missing: list) -> None:
 
 # ---------------------------------------------------------------------------
 # Duplicate / update tracking
-# Detects when an existing file is re-uploaded with different content.
-# n8n re-sends all files every poll with the same bytes → those are silent.
-# Only files whose MD5 changes are flagged as genuine duplicates.
+# Uses Google Drive modifiedTime to detect genuine re-uploads.
+# n8n re-sends all files every 5-min poll with the same modifiedTime → silent.
+# Only files whose modifiedTime changes are flagged as genuine re-uploads.
 # ---------------------------------------------------------------------------
 _updates_lock = threading.Lock()
-_pending_updates: Dict[str, list] = {}  # folder_path → [filenames with changed content]
+_pending_updates: Dict[str, list] = {}  # folder_path → [filenames with changed modifiedTime]
+
+_file_state_lock = threading.Lock()
 
 
-def _file_hash(path: Path) -> str:
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def _load_file_state() -> dict:
+    if config.FILE_STATE.exists():
+        try:
+            return json.loads(config.FILE_STATE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_file_state(state: dict) -> None:
+    config.FILE_STATE.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def _check_and_update_mtime(file_key: str, new_mtime: str) -> bool:
+    """Return True if modifiedTime changed (genuine re-upload). Always saves new_mtime."""
+    with _file_state_lock:
+        state = _load_file_state()
+        prev_mtime = state.get(file_key)
+        state[file_key] = new_mtime
+        _save_file_state(state)
+    return prev_mtime is not None and prev_mtime != new_mtime
 
 
 def _record_update(folder_key: str, filename: str) -> None:
@@ -211,15 +227,27 @@ def _run_single_project(weldment: Path, folder: Path) -> None:
         )
         log.info("Alert sent — %d of %d fabrication drawing(s) MISSING.", len(missing), total_fabrication)
     else:
-        # All drawings present — ZIP every PDF in the folder and email it
-        all_pdfs = sorted(folder.glob("*.pdf"))
+        # All drawings present — ZIP only this project's drawings:
+        # the weldment (210-*) + fabrication parts (290-* and 300-*) only.
+        # Do NOT include unrelated PDFs that happen to be in the same folder.
+        relevant_pdfs = sorted(
+            p for p in folder.glob("*.pdf")
+            if config.WELDMENT_PATTERN.match(p.stem)
+            or config.SHEET_METAL_PATTERN.match(p.stem)
+            or config.MACHINING_PATTERN.match(p.stem)
+        )
         send_complete_package(
             project_name=project_name,
-            pdf_files=all_pdfs,
+            pdf_files=relevant_pdfs,
             webhook_url=config.N8N_WEBHOOK_URL,
-            folder_id=folder.name,  # folder.name == Google Drive folder ID
+            folder_id=folder.name,
+            zips_dir=config.ZIPS_DIR,
+            agent_base_url=config.AGENT_BASE_URL,
         )
-        log.info("Complete package sent — all %d fabrication drawing(s) present.", total_fabrication)
+        log.info(
+            "Complete package sent — %d fabrication drawing(s) + weldment ZIPped.",
+            len(relevant_pdfs),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -237,10 +265,11 @@ def receive_file():
       folder_id — Google Drive parent folder ID (used to group project files)
       file      — binary PDF content
     """
-    file_id   = request.form.get("file_id", "").strip()
-    filename  = request.form.get("filename", "").strip()
-    folder_id = request.form.get("folder_id", "").strip()
-    file_obj  = request.files.get("file")
+    file_id       = request.form.get("file_id", "").strip()
+    filename      = request.form.get("filename", "").strip()
+    folder_id     = request.form.get("folder_id", "").strip()
+    modified_time = request.form.get("modified_time", "").strip()
+    file_obj      = request.files.get("file")
 
     if not file_id or not filename or file_obj is None:
         return jsonify({"error": "Missing file_id, filename, or file"}), 400
@@ -254,18 +283,38 @@ def receive_file():
     project_folder.mkdir(parents=True, exist_ok=True)
 
     dest = project_folder / filename
-    existing_hash = _file_hash(dest) if dest.exists() else None
     file_obj.save(str(dest))
-    if existing_hash is not None and _file_hash(dest) != existing_hash:
-        _record_update(str(project_folder), filename)
-        log.info("Content changed (duplicate upload): %s", filename)
+
+    # Use Google Drive modifiedTime to detect genuine re-uploads.
+    # n8n re-polls send the same modifiedTime every 5 min → silent.
+    # A real re-upload has a newer modifiedTime → triggers duplicate notification.
+    if modified_time:
+        file_key = f"{folder_id}/{file_id}"
+        if _check_and_update_mtime(file_key, modified_time):
+            _record_update(str(project_folder), filename)
+            log.info("Re-uploaded (modifiedTime changed): %s", filename)
+        else:
+            log.info("Saved: %s → %s", filename, dest)
     else:
-        log.info("Saved: %s → %s", filename, dest)
+        log.info("Saved: %s → %s (no modifiedTime provided)", filename, dest)
 
     _schedule_pipeline(project_folder)
 
     return jsonify({"status": "accepted", "saved_to": str(dest)}), 200
 
+
+
+@app.route("/download/<filename>", methods=["GET"])
+def download_zip(filename):
+    """Serve a generated ZIP file so n8n can download and attach it to Gmail."""
+    from flask import send_file
+    if not filename.endswith(".zip"):
+        return jsonify({"error": "Not found"}), 404
+    zip_path = config.ZIPS_DIR / filename
+    if not zip_path.exists():
+        return jsonify({"error": "File not found"}), 404
+    return send_file(str(zip_path), mimetype="application/zip",
+                     as_attachment=True, download_name=filename)
 
 
 @app.route("/analyze", methods=["POST"])
@@ -308,13 +357,16 @@ def health():
 
 def main() -> None:
     config.INCOMING_DIR.mkdir(parents=True, exist_ok=True)
+    config.ZIPS_DIR.mkdir(parents=True, exist_ok=True)
 
     log.info("Drawing Checker Agent starting (HTTP mode).")
     log.info("Port         : %d", config.AGENT_PORT)
     log.info("Incoming dir : %s", config.INCOMING_DIR)
+    log.info("Zips dir     : %s", config.ZIPS_DIR)
     log.info("Results cache: %s", config.RESULTS_FILE)
     log.info("Settle delay : %ds", config.SETTLE_SECONDS)
     log.info("n8n webhook  : %s", config.N8N_WEBHOOK_URL or "(not set)")
+    log.info("Agent URL    : %s", config.AGENT_BASE_URL)
 
     app.run(host="0.0.0.0", port=config.AGENT_PORT, threaded=True)
 

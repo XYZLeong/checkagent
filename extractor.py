@@ -5,12 +5,16 @@ extracts the part list table from it.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
 import pdfplumber
 
 from config import WELDMENT_PATTERN, HEADER_KEYWORDS
+
+# Engineering part number: 3 digits – 5 digits – 2 digits (optional revision suffix)
+_PART_NO_RE = re.compile(r"(\d{3}-\d{5}-\d{2}(?:-[A-Za-z]\d+)?)", re.IGNORECASE)
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +65,34 @@ def _col_index(headers: list[str], *candidates: str) -> Optional[int]:
     return None
 
 
+def _scan_row_for_part_no(row: list) -> str:
+    """
+    Scan all cells (and adjacent pairs) in *row* for an engineering part number.
+
+    Handles two PDF table layouts:
+      • Normal:  one cell contains the full part number  e.g. '290-38199-00'
+      • Split:   the part number is broken across two adjacent cells
+                 e.g. '1 290-'  +  '38199-00'  →  '290-38199-00'
+    Returns the part number string, or "" if none found.
+    """
+    cells = [str(c).strip() if c is not None else "" for c in row]
+
+    # Pass 1 — full part number inside a single cell
+    for cell in cells:
+        m = _PART_NO_RE.search(cell)
+        if m:
+            return m.group(1)
+
+    # Pass 2 — part number split across adjacent cells (first cell ends with '-')
+    for i in range(len(cells) - 1):
+        if cells[i].endswith("-") and cells[i + 1]:
+            m = _PART_NO_RE.search(cells[i] + cells[i + 1])
+            if m:
+                return m.group(1)
+
+    return ""
+
+
 def extract_part_list(pdf_path: Path) -> list[dict]:
     """
     Open *pdf_path* and extract the part list table.
@@ -91,7 +123,15 @@ def extract_part_list(pdf_path: Path) -> list[dict]:
                     continue
 
                 for row in table[header_idx + 1 :]:
-                    part_no = str(row[part_col]).strip() if row[part_col] else ""
+                    # Primary: scan every cell (and adjacent pairs) for a part number pattern.
+                    # This handles PDFs where the part number column header or value is split
+                    # across multiple cells (e.g. '1 290-' | '38199-00').
+                    part_no = _scan_row_for_part_no(row)
+
+                    # Fallback: use the column-detected value if no pattern match found.
+                    if not part_no and part_col is not None and row[part_col]:
+                        part_no = str(row[part_col]).strip()
+
                     description = str(row[desc_col]).strip() if desc_col is not None and row[desc_col] else ""
                     qty_raw = str(row[qty_col]).strip() if qty_col is not None and row[qty_col] else "1"
 

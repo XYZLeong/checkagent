@@ -21,6 +21,7 @@ This means:
 
 import json
 import logging
+import re
 import threading
 from pathlib import Path
 from typing import Dict
@@ -227,15 +228,23 @@ def _run_single_project(weldment: Path, folder: Path) -> None:
         )
         log.info("Alert sent — %d of %d fabrication drawing(s) MISSING.", len(missing), total_fabrication)
     else:
-        # All drawings present — ZIP only this project's drawings:
-        # the weldment (210-*) + fabrication parts (290-* and 300-*) only.
-        # Do NOT include unrelated PDFs that happen to be in the same folder.
-        relevant_pdfs = sorted(
-            p for p in folder.glob("*.pdf")
-            if config.WELDMENT_PATTERN.match(p.stem)
-            or config.SHEET_METAL_PATTERN.match(p.stem)
-            or config.MACHINING_PATTERN.match(p.stem)
-        )
+        # All drawings present — ZIP only THIS project's drawings:
+        # the weldment + the fabrication parts listed in ITS BOM.
+        # Using result["present"] (not a pattern glob) ensures that drawings from
+        # other projects in the same folder are never bundled into the wrong ZIP.
+        _rev_re = re.compile(r"-P\d+$", re.IGNORECASE)
+        present_bases = {
+            _rev_re.sub("", p["part_no"]).strip().lower()
+            for p in result["present"]
+        }
+        relevant_pdfs = [weldment]
+        for pdf in folder.glob("*.pdf"):
+            if pdf == weldment:
+                continue
+            stem = pdf.stem.lower()
+            if any(stem.startswith(base) for base in present_bases):
+                relevant_pdfs.append(pdf)
+        relevant_pdfs = sorted(relevant_pdfs)
         send_complete_package(
             project_name=project_name,
             pdf_files=relevant_pdfs,

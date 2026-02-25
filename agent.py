@@ -208,6 +208,9 @@ def _run_assembly_project(assembly_pdf: Path, folder: Path) -> None:
             all_fabrication_parts.extend(weldment_parts)
 
     # Step 3: Check fabrication parts (290-*, 300-*) across all present weldments
+    # Also include parts listed directly in the 215 BOM (290-*/300-* can appear there too).
+    # check_drawings filters by classify_part so 210-* entries are safely ignored.
+    all_fabrication_parts.extend(assembly_parts)
     fab_result = (
         check_drawings(all_fabrication_parts, folder)
         if all_fabrication_parts

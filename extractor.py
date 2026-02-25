@@ -11,12 +11,23 @@ from typing import Optional
 
 import pdfplumber
 
-from config import WELDMENT_PATTERN, HEADER_KEYWORDS
+from config import ASSEMBLY_PATTERN, WELDMENT_PATTERN, HEADER_KEYWORDS
 
 # Engineering part number: 3 digits – 5 digits – 2 digits (optional revision suffix)
 _PART_NO_RE = re.compile(r"(\d{3}-\d{5}-\d{2}(?:-[A-Za-z]\d+)?)", re.IGNORECASE)
 
 log = logging.getLogger(__name__)
+
+
+def find_all_assembly_files(folder: Path) -> list:
+    """Return all PDFs in *folder* whose stem matches the assembly pattern (215-*), newest first."""
+    matches = [p for p in folder.glob("*.pdf") if ASSEMBLY_PATTERN.match(p.stem)]
+    if not matches:
+        return []
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for m in matches:
+        log.info("Found assembly file: %s", m.name)
+    return matches
 
 
 def find_weldment_file(folder: Path) -> Optional[Path]:

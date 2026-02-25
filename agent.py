@@ -30,7 +30,7 @@ from flask import Flask, request, jsonify
 
 import config
 from analyzer import check_drawings
-from extractor import extract_part_list, find_all_weldment_files
+from extractor import extract_part_list, find_all_assembly_files, find_all_weldment_files
 from notifier import send_alert, send_complete_package
 
 # ---------------------------------------------------------------------------
@@ -162,15 +162,144 @@ def _fire_pipeline(folder: Path) -> None:
 # Pipeline
 # ---------------------------------------------------------------------------
 
+def _run_assembly_project(assembly_pdf: Path, folder: Path) -> None:
+    """
+    Process a 215-* assembly drawing.
+
+    Pipeline:
+      1. Extract 215 BOM → find required 210-* weldments
+      2. For each present 210-*, extract its BOM → find required 290-*/300-* parts
+      3. Check all required drawings are present in the folder
+      4. Send alert (if anything missing) or complete ZIP (if all present)
+
+    ZIP includes: 215 + all 210 weldments + all fabrication parts (290/300).
+    """
+    match = config.ASSEMBLY_PATTERN.match(assembly_pdf.stem)
+    project_name = match.group(0) if match else assembly_pdf.stem
+    log.info("--- Assembly: %s ---", project_name)
+
+    assembly_parts = extract_part_list(assembly_pdf)
+    if not assembly_parts:
+        log.warning("Part list is empty for %s — skipping.", project_name)
+        return
+
+    _rev_re = re.compile(r"-P\d+$", re.IGNORECASE)
+    available_pdfs = list(folder.glob("*.pdf"))
+
+    # Step 1: Find which 210-* weldments are listed in the 215's BOM
+    missing_weldments: list[dict] = []
+    present_weldment_pdfs: list[Path] = []
+    all_fabrication_parts: list[dict] = []
+
+    for part in assembly_parts:
+        if not config.WELDMENT_PATTERN.match(part["part_no"]):
+            continue
+        base = _rev_re.sub("", part["part_no"]).strip().lower()
+        found_pdf = next(
+            (p for p in available_pdfs if p.stem.lower().startswith(base)), None
+        )
+        if found_pdf is None:
+            missing_weldments.append({**part, "type": "weldment"})
+            log.warning("Weldment drawing MISSING: %s", part["part_no"])
+        else:
+            present_weldment_pdfs.append(found_pdf)
+            # Step 2: Extract fabrication parts from this weldment's BOM
+            weldment_parts = extract_part_list(found_pdf)
+            all_fabrication_parts.extend(weldment_parts)
+
+    # Step 3: Check fabrication parts (290-*, 300-*) across all present weldments
+    fab_result = (
+        check_drawings(all_fabrication_parts, folder)
+        if all_fabrication_parts
+        else {"present": [], "missing": [], "standard": []}
+    )
+
+    all_missing = missing_weldments + fab_result["missing"]
+    total_required = (
+        len(missing_weldments) + len(present_weldment_pdfs)
+        + len(fab_result["present"]) + len(fab_result["missing"])
+    )
+
+    if not _result_changed(project_name, all_missing):
+        duplicates = _pop_updates(str(folder))
+        if duplicates and config.N8N_WEBHOOK_URL:
+            log.info("%d duplicate upload(s) for %s — sending notification.", len(duplicates), project_name)
+            send_alert(
+                project_name=project_name,
+                folder=folder,
+                total_fabrication=total_required,
+                missing_drawings=all_missing,
+                webhook_url=config.N8N_WEBHOOK_URL,
+                duplicated_drawings=duplicates,
+            )
+        else:
+            log.info("No change in results for %s — skipping notification.", project_name)
+        return
+
+    _update_result(project_name, all_missing)
+    duplicates = _pop_updates(str(folder))
+
+    if not config.N8N_WEBHOOK_URL:
+        log.warning("N8N_WEBHOOK_URL not set — skipping notification.")
+        log.info("Missing: %s", [m["part_no"] for m in all_missing])
+        return
+
+    if all_missing:
+        send_alert(
+            project_name=project_name,
+            folder=folder,
+            total_fabrication=total_required,
+            missing_drawings=all_missing,
+            webhook_url=config.N8N_WEBHOOK_URL,
+            duplicated_drawings=duplicates,
+        )
+        log.info("Alert sent — %d drawing(s) MISSING for assembly %s.", len(all_missing), project_name)
+    else:
+        # All drawings present — ZIP: 215 + all 210s + all fabrication parts
+        present_bases = {
+            _rev_re.sub("", p["part_no"]).strip().lower()
+            for p in fab_result["present"]
+        }
+        relevant_pdfs = [assembly_pdf] + present_weldment_pdfs
+        for pdf in folder.glob("*.pdf"):
+            if pdf in relevant_pdfs:
+                continue
+            if any(pdf.stem.lower().startswith(base) for base in present_bases):
+                relevant_pdfs.append(pdf)
+        relevant_pdfs = sorted(relevant_pdfs)
+
+        send_complete_package(
+            project_name=project_name,
+            pdf_files=relevant_pdfs,
+            webhook_url=config.N8N_WEBHOOK_URL,
+            folder_id=folder.name,
+            zips_dir=config.ZIPS_DIR,
+            agent_base_url=config.AGENT_BASE_URL,
+        )
+        log.info(
+            "Complete package sent — %d files ZIPped (215 + %d weldments + %d fabrication).",
+            len(relevant_pdfs), len(present_weldment_pdfs), len(fab_result["present"]),
+        )
+
+
 def run_pipeline(folder: Path) -> None:
     log.info("=== Analysis: %s ===", folder.name)
 
-    weldments = find_all_weldment_files(folder)
-    if not weldments:
-        log.warning("No 210-xxxxx-xx.pdf yet in %s — will retry when more files arrive", folder)
+    # Check for assembly drawings first (215-*).
+    # If a 215 exists it owns the 210-* weldments listed in its BOM — process as one assembly.
+    assemblies = find_all_assembly_files(folder)
+    if assemblies:
+        for assembly in assemblies:
+            _run_assembly_project(assembly, folder)
+        log.info("=== Done: %s ===", folder.name)
         return
 
-    # Process every weldment found (supports multiple projects in the same folder)
+    # No assembly drawing — fall back to standalone weldment flow (210-* only)
+    weldments = find_all_weldment_files(folder)
+    if not weldments:
+        log.warning("No 210-xxxxx-xx.pdf or 215-xxxxx-xx.pdf yet in %s — will retry when more files arrive", folder)
+        return
+
     for weldment in weldments:
         _run_single_project(weldment, folder)
 

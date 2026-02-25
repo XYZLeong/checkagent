@@ -34,9 +34,10 @@ AGENT_BASE_URL = os.getenv("AGENT_BASE_URL", "http://host.docker.internal:8765")
 
 
 # Drawing number regex patterns
-WELDMENT_PATTERN = re.compile(r"^210-\d{5}-\d{2}", re.IGNORECASE)
+ASSEMBLY_PATTERN  = re.compile(r"^215-\d{5}-\d{2}", re.IGNORECASE)  # top-level assembly
+WELDMENT_PATTERN  = re.compile(r"^210-\d{5}-\d{2}", re.IGNORECASE)  # weldment (child of 215)
 SHEET_METAL_PATTERN = re.compile(r"^290-\d{5}-\d{2}", re.IGNORECASE)
-MACHINING_PATTERN = re.compile(r"^300-\d{5}-\d{2}", re.IGNORECASE)
+MACHINING_PATTERN   = re.compile(r"^300-\d{5}-\d{2}", re.IGNORECASE)
 
 # Keywords used to locate the header row in a PDF part list table
 HEADER_KEYWORDS = {"part", "no", "number", "description", "qty", "quantity", "item"}

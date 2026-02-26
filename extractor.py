@@ -85,6 +85,30 @@ def _col_index(headers: list[str], *candidates: str) -> Optional[int]:
     return None
 
 
+def _description_for_row(row: list) -> str:
+    """
+    Find the best description text in a row by scanning all cells.
+
+    Used as a fallback when the column-detected description is just a number
+    (e.g. item numbers in merged-header tables).  Returns the first cell that:
+      • is not empty
+      • is not a pure number / item counter
+      • does not look like a part number
+      • contains letters and is at least 5 characters long
+    """
+    cells = [str(c).strip() if c is not None else "" for c in row]
+    for cell in cells:
+        if not cell:
+            continue
+        if re.fullmatch(r"[\d\s.]+", cell):   # skip pure numbers / item counters
+            continue
+        if _PART_NO_RE.search(cell):           # skip part numbers
+            continue
+        if len(cell) >= 5 and re.search(r"[A-Za-z]", cell):
+            return cell.replace("\n", ", ")
+    return ""
+
+
 def _scan_row_for_part_nos(row: list) -> list[str]:
     """
     Scan all cells in *row* for engineering part numbers.
@@ -155,6 +179,10 @@ def extract_part_list(pdf_path: Path) -> list[dict]:
                             part_nos = [raw]
 
                     description = str(row[desc_col]).strip() if desc_col is not None and row[desc_col] else ""
+                    # Fallback: if desc_col gives a pure number (item counter from
+                    # merged-header tables), scan the row for the real description.
+                    if not description or re.fullmatch(r"[\d\s]+", description):
+                        description = _description_for_row(row)
                     qty_raw = str(row[qty_col]).strip() if qty_col is not None and row[qty_col] else "1"
 
                     # Try to parse qty as a number, fallback to 1

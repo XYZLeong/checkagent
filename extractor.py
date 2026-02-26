@@ -52,13 +52,22 @@ def find_all_weldment_files(folder: Path) -> list:
 def _find_header_row(rows: list[list]) -> Optional[int]:
     """
     Return the index of the row that looks like a table header.
-    We look for a row where at least 2 cells contain header keywords.
+
+    Handles two layouts:
+      • Normal:  multiple separate cells each containing a keyword
+                 e.g. 'ITEM' | 'PART NUMBER' | 'DESCRIPTION' | 'QTY'
+      • Merged:  all column headers collapsed into one cell
+                 e.g. 'PARTS LIST\nITEM PART NUMBER DESCRIPTION PART QTY'
     """
     for i, row in enumerate(rows):
         cells = [str(c).lower().strip() for c in row if c]
-        # A header row typically has words like 'part', 'no', 'qty', 'description'
+        # Normal case: at least 2 cells individually match a header keyword
         matches = sum(1 for cell in cells if any(kw in cell for kw in HEADER_KEYWORDS))
         if matches >= 2:
+            return i
+        # Merged header: one cell contains 3+ distinct header keywords
+        distinct_kw = sum(1 for kw in HEADER_KEYWORDS if any(kw in cell for cell in cells))
+        if distinct_kw >= 3:
             return i
     return None
 
@@ -76,32 +85,33 @@ def _col_index(headers: list[str], *candidates: str) -> Optional[int]:
     return None
 
 
-def _scan_row_for_part_no(row: list) -> str:
+def _scan_row_for_part_nos(row: list) -> list[str]:
     """
-    Scan all cells (and adjacent pairs) in *row* for an engineering part number.
+    Scan all cells in *row* for engineering part numbers.
 
-    Handles two PDF table layouts:
-      • Normal:  one cell contains the full part number  e.g. '290-38199-00'
-      • Split:   the part number is broken across two adjacent cells
-                 e.g. '1 290-'  +  '38199-00'  →  '290-38199-00'
-    Returns the part number string, or "" if none found.
+    Returns a deduplicated list of all part numbers found. Handles:
+      • Normal:   one cell contains the full part number
+      • Merged:   multiple part numbers in one cell separated by newlines
+                  e.g. '210-35052-00\\n548-32-003' → ['210-35052-00']
+      • Split:    part number broken across two adjacent cells (first ends with '-')
+                  e.g. '1 290-' + '38199-00' → ['290-38199-00']
     """
     cells = [str(c).strip() if c is not None else "" for c in row]
+    found: list[str] = []
 
-    # Pass 1 — full part number inside a single cell
+    # Pass 1 — findall in each cell (handles merged/multiline cells too)
     for cell in cells:
-        m = _PART_NO_RE.search(cell)
-        if m:
-            return m.group(1)
+        found.extend(_PART_NO_RE.findall(cell))
+
+    if found:
+        return list(dict.fromkeys(found))  # deduplicate, preserve order
 
     # Pass 2 — part number split across adjacent cells (first cell ends with '-')
     for i in range(len(cells) - 1):
         if cells[i].endswith("-") and cells[i + 1]:
-            m = _PART_NO_RE.search(cells[i] + cells[i + 1])
-            if m:
-                return m.group(1)
+            found.extend(_PART_NO_RE.findall(cells[i] + cells[i + 1]))
 
-    return ""
+    return list(dict.fromkeys(found))
 
 
 def extract_part_list(pdf_path: Path) -> list[dict]:
@@ -134,29 +144,29 @@ def extract_part_list(pdf_path: Path) -> list[dict]:
                     continue
 
                 for row in table[header_idx + 1 :]:
-                    # Primary: scan every cell (and adjacent pairs) for a part number pattern.
-                    # This handles PDFs where the part number column header or value is split
-                    # across multiple cells (e.g. '1 290-' | '38199-00').
-                    part_no = _scan_row_for_part_no(row)
+                    # Primary: scan every cell for part number patterns.
+                    # Returns a list — handles merged cells with multiple parts per row.
+                    part_nos = _scan_row_for_part_nos(row)
 
                     # Fallback: use the column-detected value if no pattern match found.
-                    if not part_no and part_col is not None and row[part_col]:
-                        part_no = str(row[part_col]).strip()
+                    if not part_nos and part_col is not None and row[part_col]:
+                        raw = str(row[part_col]).strip()
+                        if raw:
+                            part_nos = [raw]
 
                     description = str(row[desc_col]).strip() if desc_col is not None and row[desc_col] else ""
                     qty_raw = str(row[qty_col]).strip() if qty_col is not None and row[qty_col] else "1"
 
-                    # Skip blank or repeated-header rows
-                    if not part_no or part_no.lower() in {"", "part no", "part number", "none"}:
-                        continue
-
                     # Try to parse qty as a number, fallback to 1
                     try:
-                        qty = int(float(qty_raw))
-                    except ValueError:
+                        qty = int(float(qty_raw.split()[0]))  # handle "1\n2" merged qty
+                    except (ValueError, IndexError):
                         qty = 1
 
-                    parts.append({"part_no": part_no, "description": description, "qty": qty})
+                    for part_no in part_nos:
+                        if not part_no or part_no.lower() in {"part no", "part number", "none"}:
+                            continue
+                        parts.append({"part_no": part_no, "description": description, "qty": qty})
 
     log.info("Extracted %d parts from %s", len(parts), pdf_path.name)
     return parts
